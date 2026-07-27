@@ -20,6 +20,7 @@ import logging
 import os
 import re
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from typing import Optional
 
 
@@ -52,6 +53,32 @@ logger.info(f'FUNCTION_TAG_VALUE: {FUNCTION_TAG_VALUE}')
 FUNCTION_INPUT_SCHEMA_ARN_TAG_KEY = os.environ.get('FUNCTION_INPUT_SCHEMA_ARN_TAG_KEY')
 logger.info(f'FUNCTION_INPUT_SCHEMA_ARN_TAG_KEY: {FUNCTION_INPUT_SCHEMA_ARN_TAG_KEY}')
 
+# --- Bedrock AgentCore Gateway 向けの追加設定 (fork 独自) ---
+# AgentCore Gateway の mcpServer ターゲットは streamable-http でしか繋がらないので、
+# 環境変数で stdio から切り替えられるようにしている。既定は上流と同じ stdio。
+MCP_TRANSPORT = os.environ.get('MCP_TRANSPORT', 'stdio')
+logger.info(f'MCP_TRANSPORT: {MCP_TRANSPORT}')
+
+MCP_HOST = os.environ.get('MCP_HOST', '127.0.0.1')
+logger.info(f'MCP_HOST: {MCP_HOST}')
+
+MCP_PORT = int(os.environ.get('MCP_PORT', '8000'))
+logger.info(f'MCP_PORT: {MCP_PORT}')
+
+# AgentCore Gateway 側がリクエストごとに Mcp-Session-Id を付けてくるため、
+# サーバーがセッションを持つ (stateful) と "Missing session ID" で弾かれる。
+# 公式の MCP protocol contract でも stateless_http=True が要求されている。
+MCP_STATELESS_HTTP = os.environ.get('MCP_STATELESS_HTTP', 'true').lower() in ('1', 'true', 'yes')
+logger.info(f'MCP_STATELESS_HTTP: {MCP_STATELESS_HTTP}')
+
+# ALB のヘルスチェックや Gateway からのアクセスは Host ヘッダーが localhost に
+# ならないので、FastMCP の DNS rebinding 保護に引っかかって 421 で落ちる。
+# ALB 配下に置く前提なら切る。直接インターネットに晒す場合は true のままにする。
+MCP_DNS_REBINDING_PROTECTION = os.environ.get(
+    'MCP_DNS_REBINDING_PROTECTION', 'true'
+).lower() in ('1', 'true', 'yes')
+logger.info(f'MCP_DNS_REBINDING_PROTECTION: {MCP_DNS_REBINDING_PROTECTION}')
+
 # Initialize AWS clients
 session = boto3.Session(profile_name=AWS_PROFILE, region_name=AWS_REGION)
 lambda_client = session.client('lambda')
@@ -62,6 +89,9 @@ mcp = FastMCP(
     instructions="""Use AWS Lambda functions to improve your answers.
     These Lambda functions give you additional capabilities and access to AWS services and resources in an AWS account.""",
     dependencies=['pydantic', 'boto3'],
+    transport_security=TransportSecuritySettings(
+        enable_dns_rebinding_protection=MCP_DNS_REBINDING_PROTECTION
+    ),
 )
 
 
@@ -325,7 +355,20 @@ def main():
     """Run the MCP server with CLI argument support."""
     register_lambda_functions()
 
-    mcp.run()
+    # 既定 (stdio) では上流と同じ挙動。MCP_TRANSPORT=streamable-http のときだけ
+    # HTTP サーバーとして待ち受け、AgentCore Gateway のターゲットになれるようにする。
+    if MCP_TRANSPORT == 'stdio':
+        mcp.run()
+        return
+
+    mcp.settings.host = MCP_HOST
+    mcp.settings.port = MCP_PORT
+    mcp.settings.stateless_http = MCP_STATELESS_HTTP
+    logger.info(
+        f'Starting MCP server: transport={MCP_TRANSPORT} '
+        f'host={MCP_HOST} port={MCP_PORT} stateless_http={MCP_STATELESS_HTTP}'
+    )
+    mcp.run(transport=MCP_TRANSPORT)
 
 
 if __name__ == '__main__':
