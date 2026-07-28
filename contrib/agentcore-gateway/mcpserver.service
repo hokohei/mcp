@@ -19,6 +19,8 @@ Environment=AWS_REGION=ap-northeast-1
 # 公開したい Lambda を絞る。未設定だと全関数がツールとして登録される
 Environment=FUNCTION_PREFIX=agentcore-gateway-
 
+# ALB のターゲットグループは health-check-path=/health, matcher=200 にする。
+# / は 404、/mcp への GET は 406 になるため。
 ExecStart=/home/ec2-user/.local/bin/uv run awslabs.lambda-tool-mcp-server
 
 Restart=always

@@ -28,6 +28,8 @@ AgentCore Gateway から VPC 内リソースへの接続検証で
 | `MCP_STATELESS_HTTP` | `true` | ステートレスモード |
 | `MCP_DNS_REBINDING_PROTECTION` | `true` | FastMCP の DNS rebinding 保護 |
 
+加えて、ロードバランサ用に `GET /health` を追加しています。
+
 ### なぜこの 2 つが必要か
 
 **`MCP_STATELESS_HTTP`**
@@ -54,6 +56,44 @@ ALB を前段に置く構成では `false` にします。
 
 インターネットに直接公開する場合は `true` のままにするか、
 `TransportSecuritySettings.allowed_hosts` を使ってください。
+
+## ヘルスチェック用エンドポイント `GET /health`
+
+ALB のヘルスチェックは GET しか送れませんが、MCP の仕様上 `/mcp` への GET は
+`406 Not Acceptable` になります。`/` は `404` です。
+
+```
+GET /        → 404 Not Found
+GET /mcp     → 406 Not Acceptable
+POST /mcp    → 200 OK
+GET /health  → 200 OK      ← このフォークで追加
+```
+
+matcher を `200-499` のように広げれば回避できますが、それだとプロセスが何か
+応答するだけで healthy と判定されてしまい、異常検知の精度が落ちます。
+`/health` を使えば `matcher=200` で厳密に判定できます。
+
+```bash
+aws elbv2 modify-target-group --region ap-northeast-1 \
+  --target-group-arn <TG_ARN> \
+  --health-check-path /health \
+  --matcher HttpCode=200
+```
+
+レスポンスは登録済みツール数も返すので、Lambda のフィルタ設定が意図通りか
+確認するのにも使えます。
+
+```json
+{"status": "ok", "transport": "streamable-http", "tools": 1}
+```
+
+FastMCP の `custom_route` は認可の対象外です。公式にもヘルスチェック用途が
+想定されていますが、機密情報を返さないよう注意してください。
+
+> Routes using this decorator will not require authorization. It is intended
+> for uses that are either a part of authorization flows or intended to be
+> public such as health check endpoints.
+
 
 ## 使い方
 
@@ -91,6 +131,13 @@ curl -s -X POST http://127.0.0.1:8000/mcp \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
 ```
 
+ヘルスチェックの確認（ALB と同じ GET を投げる）。
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -H 'Host: example.com' http://127.0.0.1:8000/health
+# → 200
+```
+
 ### EC2 上で常駐させる
 
 `contrib/agentcore-gateway/mcpserver.service` を使います。
@@ -119,6 +166,7 @@ sudo journalctl -u mcpserver -f
 | endpoint は HTTPS 必須 | プライベート IP を直接書くと `blocked IP address` で拒否される |
 | endpoint はカスタムドメインを使う | ALB の DNS 名を直接指定すると TLS ホスト名検証で落ちる。ACM 証明書の SAN に含まれる名前にする |
 | 証明書はパブリック信頼が必要 | プライベート CA だと `PKIX path building failed` |
+| ALB のヘルスチェックパス | `/health` を使う（`/` は 404、`/mcp` への GET は 406） |
 | Resource Gateway SG の **egress** | ターゲット宛の TCP 443 と DNS 53 を開ける。inbound だけでは足りない |
 | ALB SG の inbound | Resource Gateway の SG / サブネット CIDR からの 443 を許可する |
 | IAM (SigV4) アウトバウンド認証は使えない | ALB / EC2 は SigV4 を検証しないため。API key か OAuth を使う |

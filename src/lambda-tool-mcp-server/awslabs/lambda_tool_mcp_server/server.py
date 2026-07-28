@@ -21,6 +21,8 @@ import os
 import re
 from mcp.server.fastmcp import Context, FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
+from starlette.requests import Request
+from starlette.responses import JSONResponse
 from typing import Optional
 
 
@@ -93,6 +95,24 @@ mcp = FastMCP(
         enable_dns_rebinding_protection=MCP_DNS_REBINDING_PROTECTION
     ),
 )
+
+
+@mcp.custom_route('/health', methods=['GET'])
+async def health_check(request: Request) -> JSONResponse:
+    """Return 200 for load balancer health checks.
+
+    ALB のヘルスチェックは GET しか送れないが、`/mcp` への GET は MCP の仕様上
+    406 Not Acceptable になる。matcher を 200-499 のように広げて回避すると
+    プロセスが応答するだけで healthy と判定されてしまうため、MCP プロトコル外の
+    素の HTTP エンドポイントを用意して matcher=200 で厳密に判定できるようにする。
+    """
+    return JSONResponse(
+        {
+            'status': 'ok',
+            'transport': MCP_TRANSPORT,
+            'tools': len(await mcp.list_tools()),
+        }
+    )
 
 
 def validate_function_name(function_name: str) -> bool:
